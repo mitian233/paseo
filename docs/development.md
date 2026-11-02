@@ -29,6 +29,29 @@ the titlebar row. Production builds leave the variable unset and show no label.
 
 `npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
 
+## Go native desktop
+
+The native client lives in `packages/native-desktop` and connects to an already
+running daemon. Use Go 1.27.3 or a Go installation with automatic toolchain
+downloads enabled:
+
+```bash
+cd packages/native-desktop
+go run ./cmd/paseo-desktop --url ws://127.0.0.1:6768/ws
+```
+
+Enter credentials in the window. For native Mermaid text, set `PASEO_CJK_FONT` to
+an installed OpenType/TrueType CJK font or collection if font discovery does not
+find one. The font must be installed on the client machine.
+
+The native client is under development; keep using the existing desktop app for
+capabilities outside its accepted slice. See the [execution contract](ryugi/specs/2026-10-30-mygo-execution-contract.md)
+and [acceptance record](ryugi/specs/2026-10-30-mygo-execution-plan.md) for scope and
+unresolved Mermaid compatibility and platform checks.
+
+The `e2e` build tag includes MyGo's local automation socket for native UI checks.
+It is excluded from normal builds. Use it only with an isolated test daemon.
+
 ## Nix desktop package
 
 The flake exposes `packages.<system>.desktop` on Linux and macOS:
