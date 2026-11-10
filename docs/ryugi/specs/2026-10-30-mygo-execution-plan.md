@@ -33,3 +33,5 @@ A行为检查和真实daemon smoke通过后已实施。入口 `packages/native-d
 - 本轮MyGo验证通过：`go test -race ./internal/client ./internal/protocol ./internal/timeline -count=1`、`go test -race ./internal/workbench -count=1`、桌面入口build及生成二进制的`--help`实际执行。检查只覆盖MyGo相关包，不再运行全仓库检查；未重新运行Mermaid测试或视觉验收。
 - 本轮真实daemon smoke未通过启动阶段：临时随机端口/临时数据目录实例复用现有daemon测试夹具，其terminal worker缺少`@getpaseo/plugin/server`模块解析。没有修改daemon产品代码，也没有触碰6767实例；按用户限定的MyGo范围记录环境阻碍，不继续补daemon依赖。前次真实daemon成功记录不代表本轮新修复已完成该验证。
 - 较低优先级暂缓：timeline合并文本未检查源序列相邻性（交错tool更新可能使两段文本合成一行）。视觉验收与macOS/Windows实机仍未通过；不得称完整替代完成。
+- 2026-11-05 当前daemon对齐通过。上游合并后本地生成物与依赖过期导致两次启动失败：重新运行protocol `generate:validators` 修正过期validator；`pnpm install --no-frozen-lockfile`（用户此前使用pnpm布局）补齐缺失的terminal依赖。随后用当前server源码启动独立临时daemon（随机端口、临时PASEO_HOME，未触碰6767），Go客户端 `TestExistingDaemonSmoke` 与 `TestExistingDaemonPromptPersistence` 均通过，覆盖握手、目录、owned订阅、历史、发送与持久化。
+- 同日在无GPU的Wayland headless合成器上运行实际MyGo窗口（e2e自动化，CPU绘制），已实际操作：选择中文会话并显示历史与回复；发送中文prompt并收到接受状态与回复；权限卡片批准与拒绝均移除卡片且不遗留操作。证据为窗口自身截图与发送录屏，位于 `.ryugi/artifacts/artboard/verify-native-desktop/pages/verify/`，画板warnings/pending为空；批准过程的录屏捕获与点击串行化冲突，改用请求前后截图。以上仍待用户给出视觉判定。
