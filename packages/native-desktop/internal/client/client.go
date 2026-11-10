@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,9 +39,10 @@ type result struct {
 	err     error
 }
 type pendingCall struct {
-	ch      chan result
-	sub     *Subscription
-	started bool
+	ch       chan result
+	sub      *Subscription
+	started  bool
+	terminal *TerminalStream
 }
 type Client struct {
 	mu               sync.Mutex
@@ -50,6 +52,7 @@ type Client struct {
 	connecting       context.CancelFunc
 	pending          map[string]*pendingCall
 	subs             map[*Subscription]struct{}
+	terminals        map[byte]*TerminalStream
 	info             json.RawMessage
 	owned, selective bool
 	epoch            uint64
@@ -150,7 +153,7 @@ func (c *Client) Connect(ctx context.Context, target Target) (retErr error) {
 	if err != nil {
 		return err
 	}
-	hello := map[string]any{"type": "hello", "clientId": id, "clientType": "cli", "protocolVersion": 1, "capabilities": map[string]bool{"hello_rejection": true, "owned_subscriptions": true, "selective_agent_timeline": true, "all_providers": true, "timeline_notifications": true}}
+	hello := map[string]any{"type": "hello", "clientId": id, "clientType": "cli", "protocolVersion": 1, "capabilities": map[string]bool{"hello_rejection": true, "owned_subscriptions": true, "selective_agent_timeline": true, "all_providers": true, "timeline_notifications": true, "terminal_chunked_replay": true}}
 	if target.LocalCredential != "" {
 		hello["auth"] = map[string]string{"kind": "localCredential", "token": target.LocalCredential}
 	} else if target.Password != "" {
@@ -292,6 +295,9 @@ func (c *Client) Call(ctx context.Context, requestType string, payload json.RawM
 	return c.call(ctx, requestType, payload, nil, nil)
 }
 func (c *Client) call(ctx context.Context, requestType string, payload json.RawMessage, sub *Subscription, expected *websocket.Conn) (json.RawMessage, error) {
+	return c.callTerminal(ctx, requestType, payload, sub, expected, nil)
+}
+func (c *Client) callTerminal(ctx context.Context, requestType string, payload json.RawMessage, sub *Subscription, expected *websocket.Conn, terminal *TerminalStream) (json.RawMessage, error) {
 	if requestType == "" {
 		return nil, errors.New("empty request type")
 	}
@@ -342,7 +348,7 @@ func (c *Client) call(ctx context.Context, requestType string, payload json.RawM
 		c.mu.Unlock()
 		return nil, errors.New("request already in flight")
 	}
-	pending := &pendingCall{ch: ch, sub: sub}
+	pending := &pendingCall{ch: ch, sub: sub, terminal: terminal}
 	c.pending[id] = pending
 	c.mu.Unlock()
 	defer func() {
@@ -378,10 +384,11 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 			c.disconnect(conn, err)
 			return
 		}
-		if kind != websocket.TextMessage {
-			continue
+		if kind == websocket.BinaryMessage {
+			c.dispatchTerminal(conn, data)
+		} else if kind == websocket.TextMessage {
+			c.dispatch(conn, data)
 		}
-		c.dispatch(conn, data)
 	}
 }
 func (c *Client) dispatch(conn *websocket.Conn, data []byte) {
@@ -406,6 +413,7 @@ func (c *Client) dispatch(conn *websocket.Conn, data []byte) {
 		Code           string `json:"code"`
 		SubscriptionID string `json:"subscriptionId"`
 		AgentID        string `json:"agentId"`
+		TerminalID     string `json:"terminalId"`
 	}
 	_ = json.Unmarshal(m.Payload, &p)
 	c.mu.Lock()
@@ -419,12 +427,23 @@ func (c *Client) dispatch(conn *websocket.Conn, data []byte) {
 			if m.Type == "rpc_error" {
 				e = &RPCError{p.RequestID, p.RequestType, p.Code, p.Error}
 			}
+			if pending.terminal != nil && m.Type == "subscribe_terminal_response" {
+				e = c.attachTerminalLocked(conn, pending.terminal, m.Payload)
+			}
 			if pending.sub != nil && m.Type == "agent.timeline.set_subscription.response" {
 				pending.sub.id = p.SubscriptionID
 			}
 			select {
 			case pending.ch <- result{m.Payload, e}:
 			default:
+			}
+		}
+	}
+	if m.Type == "terminal_stream_exit" {
+		for slot, stream := range c.terminals {
+			if stream.id == p.TerminalID && (p.SubscriptionID == "" || stream.subscriptionID == p.SubscriptionID) {
+				stream.closeLocked(io.EOF)
+				delete(c.terminals, slot)
 			}
 		}
 	}
@@ -459,6 +478,10 @@ func (c *Client) disconnect(conn *websocket.Conn, err error) {
 		case pending.ch <- result{err: fmt.Errorf("%w: %v", cause, err)}:
 		default:
 		}
+	}
+	for slot, stream := range c.terminals {
+		stream.closeLocked(ErrDisconnected)
+		delete(c.terminals, slot)
 	}
 	for s := range c.subs {
 		s.closeLocked(fmt.Errorf("%w: %v", ErrDisconnected, err))
