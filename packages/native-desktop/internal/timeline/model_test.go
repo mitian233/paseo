@@ -24,6 +24,9 @@ func TestHistoryAndIncrementalStream(t *testing.T) {
 	if len(items) != 1 || items[0].Text != "Hello world" || items[0].SeqStart != 1 || items[0].SeqEnd != 3 || items[0].ID == "" {
 		t.Fatalf("items: %+v", items)
 	}
+	if items[0].MessageID != "msg" || items[0].Epoch != "e" || items[0].Timestamp != "2026-02-08T20:10:00Z" || items[0].EndTimestamp != "2026-02-08T20:10:01Z" {
+		t.Fatalf("lost source identity or timestamps: %+v", items[0])
+	}
 	items[0].Text = "changed"
 	if m.Items()[0].Text != "Hello world" {
 		t.Fatal("Items exposes model state")
@@ -61,6 +64,45 @@ func TestToolLifecycleGapReplacementAndReset(t *testing.T) {
 	}
 	if gap, err := m.Apply(update); !gap || err != nil {
 		t.Fatalf("stream without baseline: %v %v", gap, err)
+	}
+}
+
+func TestToolUpdatePreservesStructuredDetails(t *testing.T) {
+	var m Model
+	if err := m.Replace(raw(`{"agentId":"a","direction":"tail","epoch":"e","window":{"minSeq":1,"maxSeq":1,"nextSeq":2},"endCursor":{"epoch":"e","seq":1},"entries":[{"turnId":"turn","item":{"type":"tool_call","callId":"call","name":"shell","status":"running","metadata":{"origin":"provider"},"detail":{"type":"shell","command":"pwd"}},"seqStart":1,"seqEnd":1}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if gap, err := m.Apply(raw(`{"type":"agent_stream","payload":{"agentId":"a","seq":2,"epoch":"e","event":{"type":"timeline","turnId":"turn","item":{"type":"tool_call","callId":"call","status":"failed","detail":{"type":"shell","output":"denied"},"error":"failed"}}}}`)); gap || err != nil {
+		t.Fatalf("apply: gap=%v err=%v", gap, err)
+	}
+	items := m.Items()
+	if len(items) != 1 || items[0].Name != "shell" || items[0].Status != "failed" || string(items[0].Detail) != `{"command":"pwd","output":"denied","type":"shell"}` || string(items[0].Error) != `"failed"` {
+		t.Fatalf("structured tool details lost: %+v", items)
+	}
+	var preserved struct {
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(items[0].Raw, &preserved); err != nil || preserved.Metadata["origin"] != "provider" {
+		t.Fatalf("provider metadata lost: %s", items[0].Raw)
+	}
+	items[0].Detail[0] = 'x'
+	if string(m.Items()[0].Detail) != `{"command":"pwd","output":"denied","type":"shell"}` {
+		t.Fatal("snapshot exposes mutable detail")
+	}
+}
+
+func TestToolUpdateWithNullDetailPreservesStructuredDetails(t *testing.T) {
+	var m Model
+	if err := m.Replace(raw(`{"agentId":"a","direction":"tail","epoch":"e","window":{"minSeq":1,"maxSeq":1,"nextSeq":2},"endCursor":{"epoch":"e","seq":1},"entries":[{"turnId":"turn","item":{"type":"tool_call","callId":"call","name":"shell","status":"running","detail":{"type":"shell","command":"pwd"}},"seqStart":1,"seqEnd":1}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if gap, err := m.Apply(raw(`{"type":"agent_stream","payload":{"agentId":"a","seq":2,"epoch":"e","event":{"type":"timeline","turnId":"turn","item":{"type":"tool_call","callId":"call","status":"completed","detail":null}}}}`)); gap || err != nil {
+		t.Fatalf("apply: %v %v", gap, err)
+	}
+	items := m.Items()
+	var detail map[string]json.RawMessage
+	if len(items) != 1 || json.Unmarshal(items[0].Detail, &detail) != nil || string(detail["command"]) != `"pwd"` || string(detail["type"]) != `"shell"` {
+		t.Fatalf("tool details lost on null lifecycle update: %+v", items)
 	}
 }
 

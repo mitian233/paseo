@@ -10,11 +10,21 @@ import (
 
 // Item is a display-independent snapshot of a timeline row.
 type Item struct {
-	ID       string
-	Kind     string
-	Text     string
-	SeqStart int64
-	SeqEnd   int64
+	ID           string
+	Kind         string
+	Text         string
+	MessageID    string
+	Epoch        string
+	Timestamp    string
+	EndTimestamp string
+	TurnID       string
+	Name         string
+	Status       string
+	Detail       json.RawMessage
+	Error        json.RawMessage
+	Raw          json.RawMessage
+	SeqStart     int64
+	SeqEnd       int64
 }
 
 type seqRange struct {
@@ -52,11 +62,12 @@ func (w *wireItem) UnmarshalJSON(data []byte) error {
 }
 
 type entry struct {
-	Item     wireItem   `json:"item"`
-	TurnID   string     `json:"turnId"`
-	SeqStart int64      `json:"seqStart"`
-	SeqEnd   int64      `json:"seqEnd"`
-	Ranges   []seqRange `json:"sourceSeqRanges"`
+	Item      wireItem   `json:"item"`
+	TurnID    string     `json:"turnId"`
+	Timestamp string     `json:"timestamp"`
+	SeqStart  int64      `json:"seqStart"`
+	SeqEnd    int64      `json:"seqEnd"`
+	Ranges    []seqRange `json:"sourceSeqRanges"`
 }
 type row struct {
 	Item
@@ -96,6 +107,9 @@ func (m *Model) Items() []Item {
 	items := make([]Item, len(m.rows))
 	for i := range m.rows {
 		items[i] = m.rows[i].Item
+		items[i].Detail = append(json.RawMessage(nil), items[i].Detail...)
+		items[i].Error = append(json.RawMessage(nil), items[i].Error...)
+		items[i].Raw = append(json.RawMessage(nil), items[i].Raw...)
 	}
 	return items
 }
@@ -132,6 +146,7 @@ func (m *Model) Replace(payload json.RawMessage) error {
 			return fmt.Errorf("invalid timeline entry")
 		}
 		r := newRow(e.Item, e.TurnID, p.Epoch, e.SeqStart, e.SeqEnd)
+		r.Timestamp, r.EndTimestamp = e.Timestamp, e.Timestamp
 		if len(e.Ranges) > 0 {
 			r.ranges = append([]seqRange(nil), e.Ranges...)
 		}
@@ -161,10 +176,11 @@ func (m *Model) Apply(message json.RawMessage) (bool, error) {
 	var msg struct {
 		Type    string `json:"type"`
 		Payload struct {
-			Agent string `json:"agentId"`
-			Epoch string `json:"epoch"`
-			Seq   *int64 `json:"seq"`
-			Event struct {
+			Agent     string `json:"agentId"`
+			Epoch     string `json:"epoch"`
+			Timestamp string `json:"timestamp"`
+			Seq       *int64 `json:"seq"`
+			Event     struct {
 				Type   string   `json:"type"`
 				TurnID string   `json:"turnId"`
 				Item   wireItem `json:"item"`
@@ -227,7 +243,7 @@ func (m *Model) Apply(message json.RawMessage) (bool, error) {
 		}
 	}
 	if !coveredByRow {
-		m.applyItem(p.Event.Item, p.Event.TurnID, seq)
+		m.applyItem(p.Event.Item, p.Event.TurnID, p.Timestamp, seq)
 	}
 	m.covered = seq
 	m.end = &cursor{Epoch: m.epoch, Seq: seq}
@@ -253,7 +269,7 @@ func newRow(item wireItem, turn, epoch string, start, end int64) row {
 	if identity != "" {
 		id = identity
 	}
-	return row{Item: Item{ID: id, Kind: item.Type, Text: itemText(item), SeqStart: start, SeqEnd: end}, messageID: item.MessageID, turnID: turn, identity: identity, tool: item, ranges: []seqRange{{Start: start, End: end}}}
+	return row{Item: Item{ID: id, Kind: item.Type, Text: itemText(item), MessageID: item.MessageID, Epoch: epoch, TurnID: turn, Name: item.Name, Status: item.Status, Detail: item.Detail, Error: item.Error, Raw: item.Raw, SeqStart: start, SeqEnd: end}, messageID: item.MessageID, turnID: turn, identity: identity, tool: item, ranges: []seqRange{{Start: start, End: end}}}
 }
 
 func itemText(item wireItem) string {
@@ -290,8 +306,9 @@ func itemText(item wireItem) string {
 	}
 }
 
-func (m *Model) applyItem(item wireItem, turn string, seq int64) {
+func (m *Model) applyItem(item wireItem, turn, timestamp string, seq int64) {
 	incoming := newRow(item, turn, m.epoch, seq, seq)
+	incoming.Timestamp, incoming.EndTimestamp = timestamp, timestamp
 	if incoming.identity != "" {
 		for i := range m.rows {
 			r := &m.rows[i]
@@ -300,11 +317,15 @@ func (m *Model) applyItem(item wireItem, turn string, seq int64) {
 					item = mergeTool(r.tool, item)
 					r.tool = item
 					r.Text = itemText(item)
+					r.Name, r.Status, r.Detail, r.Error, r.Raw = item.Name, item.Status, item.Detail, item.Error, item.Raw
 				} else {
 					r.Text = incoming.Text
 				}
 				if seq > r.SeqEnd {
 					r.SeqEnd = seq
+				}
+				if timestamp != "" {
+					r.EndTimestamp = timestamp
 				}
 				r.ranges = append(r.ranges, seqRange{seq, seq})
 				return
@@ -317,6 +338,9 @@ func (m *Model) applyItem(item wireItem, turn string, seq int64) {
 			r.Text += item.Text
 			if seq > r.SeqEnd {
 				r.SeqEnd = seq
+			}
+			if timestamp != "" {
+				r.EndTimestamp = timestamp
 			}
 			r.ranges = append(r.ranges, seqRange{seq, seq})
 			return
@@ -345,13 +369,28 @@ func mergeTool(old, next wireItem) wireItem {
 		} else if newType == "unknown" && oldType != "unknown" {
 			next.Detail = old.Detail
 		}
-	} else if len(next.Detail) == 0 || strings.TrimSpace(string(next.Detail)) == "null" {
+	} else if len(next.Detail) == 0 || strings.TrimSpace(string(next.Detail)) == "null" || b == nil {
 		next.Detail = old.Detail
 	}
 	if len(next.Error) == 0 || string(next.Error) == "null" {
 		if next.Status == "failed" {
 			next.Error = old.Error
 		}
+	}
+	var previous, current map[string]json.RawMessage
+	if json.Unmarshal(old.Raw, &previous) == nil && previous != nil && json.Unmarshal(next.Raw, &current) == nil && current != nil {
+		for key, value := range current {
+			previous[key] = value
+		}
+		previous["name"], _ = json.Marshal(next.Name)
+		previous["status"], _ = json.Marshal(next.Status)
+		if len(next.Detail) > 0 {
+			previous["detail"] = next.Detail
+		}
+		if len(next.Error) > 0 {
+			previous["error"] = next.Error
+		}
+		next.Raw, _ = json.Marshal(previous)
 	}
 	return next
 }
