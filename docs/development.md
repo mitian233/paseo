@@ -40,9 +40,15 @@ cd packages/native-desktop
 go run ./cmd/paseo-desktop --url ws://127.0.0.1:6768/ws
 ```
 
-Enter credentials in the window. For native Mermaid text, set `PASEO_CJK_FONT` to
-an installed OpenType/TrueType CJK font or collection if font discovery does not
-find one. The font must be installed on the client machine.
+Run without `--url` to choose a saved host or add one from a home card. Host
+credentials belong in the connection dialog and use the platform secret store.
+The home Provider setup edits existing providers; ACP catalog installation and
+provider removal still use the existing desktop app. Pair device requires a host
+that advertises the pairing capability; relay activation requires your consent.
+
+For native Mermaid text, set `PASEO_CJK_FONT` to an installed OpenType/TrueType CJK
+font or collection if font discovery does not find one. The font must be installed
+on the client machine.
 
 The native client is under development; keep using the existing desktop app for
 capabilities outside its accepted slice. See the [execution contract](ryugi/specs/2026-10-30-mygo-execution-contract.md)

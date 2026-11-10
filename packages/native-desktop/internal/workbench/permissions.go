@@ -411,18 +411,14 @@ func (p *permissions) view(c *ui.Context, respond func(string, permissionRespons
 					ui.Text(c, plan)
 				} else if plan, ok := card.request.Input["plan"].(string); ok && plan != "" {
 					ui.Text(c, plan)
-				} else if len(card.request.Detail) > 0 && string(card.request.Detail) != "null" {
-					var detail any
-					if json.Unmarshal(card.request.Detail, &detail) == nil {
-						if raw, err := json.MarshalIndent(detail, "", "  "); err == nil {
-							ui.Text(c, string(raw))
-						}
+				} else {
+					detail := card.request.Detail
+					if len(detail) == 0 || string(detail) == "null" {
+						detail, _ = json.Marshal(map[string]any{"type": "unknown", "input": card.request.Input})
 					}
-				} else if len(card.request.Input) > 0 {
-					if raw, err := json.MarshalIndent(card.request.Input, "", "  "); err == nil {
-						ui.Text(c, string(raw))
-					}
+					detailSectionsView(c, toolDetailSections(detail, nil))
 				}
+				ui.Text(c, "Allow this action?").TextColor(c.Theme().TextMuted)
 				actions := card.request.Actions
 				if len(actions) == 0 {
 					label := "Approve"

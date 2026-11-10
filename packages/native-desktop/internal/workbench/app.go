@@ -33,18 +33,46 @@ type App struct {
 	diagrams                       *Diagrams
 	permissions                    permissions
 	prompts                        promptSender
+	desk                           desktopState
+	toolExpanded                   map[string]bool
+	agentRunning                   bool
+	turnExpanded                   map[string]bool
+	rewindCapabilities             struct{ Conversation, Files, Both bool }
+	forkAvailable                  bool
+	conversationActionBusy         bool
+	projects                       []Project
+	owner                          *App
+	terminalRestoreSupported       bool
 }
 
-func New(url string) *App { return &App{URL: url} }
+func terminalRestoreAvailable(serverInfo json.RawMessage) bool {
+	var info struct {
+		Features struct {
+			TerminalRestoreModes bool `json:"terminalRestoreModes"`
+		} `json:"features"`
+	}
+	return json.Unmarshal(serverInfo, &info) == nil && info.Features.TerminalRestoreModes
+}
+
+func New(url string) *App { a := &App{URL: url}; a.initializeDesktop(url); return a }
 func (a *App) Open() {
 	a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Paseo", Width: 1100, Height: 760, MinWidth: 700, MinHeight: 480, Content: ui.View(a.view)})
 	a.diagrams = NewDiagrams(a.win.Update)
-	a.win.OnClosed(func() { a.stop(); a.diagrams.Close() })
+	a.win.OnClosed(func() { a.captureConversation(); a.persistDesktop(); a.stop(); a.diagrams.Close() })
 	if a.URL != "" {
 		a.connect()
 	}
 }
 func (a *App) stop() {
+	a.captureConversation()
+	a.closeWorkspacePanels()
+	a.closeHomeImport()
+	a.closeHomeProviders()
+	a.closeHomePairing()
+	a.workspaces = nil
+	a.agents = nil
+	a.projects = nil
+	a.desk.navigation = navigationState{}
 	a.generation++
 	a.selection++
 	a.clearContent()
@@ -107,6 +135,11 @@ func (a *App) connect() {
 		var info struct {
 			ServerID string `json:"serverId"`
 			Hostname string `json:"hostname"`
+			Features struct {
+				Fork                 bool `json:"agentForkContext"`
+				ForkCursor           bool `json:"agentForkContextCursor"`
+				TerminalRestoreModes bool `json:"terminalRestoreModes"`
+			} `json:"features"`
 		}
 		_ = json.Unmarshal(c.ServerInfo(), &info)
 		identity := info.Hostname
@@ -123,6 +156,9 @@ func (a *App) connect() {
 			a.connecting = false
 			a.connected = true
 			a.host = identity
+			a.forkAvailable = info.Features.Fork && info.Features.ForkCursor
+			a.terminalRestoreSupported = terminalRestoreAvailable(c.ServerInfo())
+			a.refreshProjects()
 			a.status = "Loading workspaces and agents…"
 		})
 		go func() {
@@ -134,6 +170,7 @@ func (a *App) connect() {
 					if event.State == "disconnected" {
 						a.update(gen, func() {
 							a.connected = false
+							a.pauseConversationOwners()
 							a.sending = false
 							a.selection++
 							if a.cancelSelection != nil {
@@ -163,11 +200,14 @@ func (a *App) connect() {
 			}
 			a.workspaces = ws
 			a.agents = agents
+			a.restoreWorkspace()
 			a.status = fmt.Sprintf("%d workspaces · %d agents", len(ws), len(agents))
+			a.resumeHomeAction()
 		})
 	}()
 }
 func (a *App) selectAgent(id string) {
+	a.captureConversation()
 	if a.cancelSelection != nil {
 		a.cancelSelection()
 	}
@@ -177,6 +217,7 @@ func (a *App) selectAgent(id string) {
 	a.selected = id
 	a.clearContent()
 	a.sending = false
+	a.restoreConversation(id)
 	a.status = "Loading conversation…"
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancelSelection = cancel
@@ -258,6 +299,7 @@ func (a *App) observe(ctx context.Context, cancelSelection context.CancelFunc, c
 				if ctx.Err() != nil {
 					return
 				}
+				a.applyAgentActivity(message)
 				if err := a.permissions.apply(id, message); err != nil {
 					cancelSelection()
 					a.status = err.Error()
@@ -307,7 +349,9 @@ func (a *App) observe(ctx context.Context, cancelSelection context.CancelFunc, c
 					a.status = err.Error()
 					return
 				}
+				a.applyAgentActivity(res.data)
 				for _, message := range pending {
+					a.applyAgentActivity(message)
 					if err := a.permissions.apply(id, message); err != nil {
 						cancelSelection()
 						a.status = err.Error()
@@ -357,95 +401,7 @@ func (a *App) send() {
 		})
 	}()
 }
-func (a *App) view(c *ui.Context) {
-	t := c.Theme()
-	ui.Column(c).Fill().Padding(12).Gap(8).Children(func() {
-		ui.Text(c, "Paseo").Bold().FontSize(20)
-		ui.Row(c).Gap(8).Children(func() {
-			ui.TextInput(c, &a.URL).Placeholder("ws://host:port/ws").Label("Daemon URL").Grow(1)
-			ui.TextInput(c, &a.Password).Placeholder("Password (optional)").Label("Password").Password().Width(180)
-			ui.TextInput(c, &a.Credential).Placeholder("Local credential (optional)").Label("Local credential").Password().Width(180)
-			if ui.PrimaryButton(c, "Connect").Disabled(a.connecting).Clicked() {
-				a.connect()
-			}
-		})
-		if a.host != "" {
-			ui.Text(c, "Host: "+a.host).Bold()
-		}
-		if a.status != "" {
-			ui.Text(c, a.status).TextColor(t.TextMuted)
-		}
-		ui.Row(c).Grow(1).Gap(12).AlignItems(ui.Stretch).Children(func() {
-			ui.Column(c).Width(260).Gap(6).Children(func() {
-				ui.Text(c, "Workspaces & agents").Bold()
-				ui.Scroll(c).Grow(1).Children(func() {
-					ui.Column(c).Gap(4).Children(func() {
-						for _, w := range a.workspaces {
-							ui.Text(c, w.Project+" / "+w.Name).Bold()
-							for _, agent := range a.agents {
-								if agent.WorkspaceID == w.ID {
-									a.agentButton(c, agent)
-								}
-							}
-						}
-						for _, agent := range a.agents {
-							found := false
-							for _, w := range a.workspaces {
-								if agent.WorkspaceID == w.ID {
-									found = true
-									break
-								}
-							}
-							if !found {
-								a.agentButton(c, agent)
-							}
-						}
-					})
-				})
-			})
-			ui.Column(c).Grow(1).Gap(8).Children(func() {
-				if a.selected == "" {
-					ui.Text(c, "Select an agent to view its conversation.").TextColor(t.TextMuted)
-				}
-				a.list.Key = func(i int) any { return a.items[i].ID }
-				a.list.FollowEnd = true
-				ui.List(c, &a.list, len(a.items), func(i int) {
-					item := a.items[i]
-					ui.Column(c).Gap(4).Children(func() {
-						ui.Text(c, roleLabel(item.Kind)).Bold()
-						markdown.View(c, item.Text, a.markdownOptions(item.ID))
-					})
-				}).Grow(1).Gap(12)
-				if len(a.permissions.cards) > 0 {
-					ui.Scroll(c).MaxHeight(260).Disabled(!a.canMutate()).Children(func() {
-						a.permissions.view(c, func(id string, response permissionResponse) {
-							if !a.canMutate() {
-								return
-							}
-							gen, selection := a.generation, a.selection
-							a.permissions.submit(a.selectionCtx, a.client, a.selected, id, response, func(fn func()) { a.selectionUpdate(gen, selection, fn) })
-						})
-					})
-				}
-				ui.Row(c).Gap(8).Children(func() {
-					in := ui.TextInput(c, &a.draft).Placeholder("Message agent").Label("Message agent").Grow(1).Disabled(!a.canMutate())
-					if ui.PrimaryButton(c, "Send").Disabled(!a.canMutate() || a.sending || strings.TrimSpace(a.draft) == "").Clicked() || in.Submitted() {
-						a.send()
-					}
-				})
-			})
-		})
-	})
-}
-func (a *App) agentButton(c *ui.Context, agent Agent) {
-	title := agent.Title
-	if title == "" {
-		title = agent.ID
-	}
-	if ui.Button(c.Key(agent.ID), title).Disabled(!a.connected).Clicked() {
-		a.selectAgent(agent.ID)
-	}
-}
+func (a *App) view(c *ui.Context) { a.shellView(c) }
 
 func roleLabel(kind string) string {
 	switch kind {

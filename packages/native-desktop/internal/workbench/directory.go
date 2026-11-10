@@ -14,10 +14,24 @@ import (
 type caller interface {
 	Call(context.Context, string, json.RawMessage) (json.RawMessage, error)
 }
+type Project struct {
+	ID   string `json:"projectId"`
+	Name string `json:"projectDisplayName"`
+	Root string `json:"projectRootPath"`
+	Kind string `json:"projectKind"`
+}
 type Workspace struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Project string `json:"projectDisplayName"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Project   string `json:"projectDisplayName"`
+	ProjectID string `json:"projectId"`
+	Root      string `json:"projectRootPath"`
+	Directory string `json:"workspaceDirectory"`
+	Git       struct {
+		CurrentBranch string `json:"currentBranch"`
+	} `json:"gitRuntime"`
+	Kind     string  `json:"projectKind"`
+	PinnedAt *string `json:"pinnedAt"`
 }
 type Agent struct {
 	ID          string `json:"id"`
@@ -25,6 +39,7 @@ type Agent struct {
 	WorkspaceID string `json:"workspaceId"`
 	CWD         string `json:"cwd"`
 	Provider    string `json:"provider"`
+	Status      string `json:"status"`
 }
 type directoryPage struct {
 	Entries  []json.RawMessage `json:"entries"`

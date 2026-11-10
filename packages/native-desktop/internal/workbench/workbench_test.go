@@ -22,6 +22,15 @@ func (f directoryCaller) Call(c context.Context, typ string, p json.RawMessage) 
 	return f(c, typ, p)
 }
 
+func TestTerminalRestoreCapabilityBlocksOlderDaemonAttach(t *testing.T) {
+	if !terminalRestoreAvailable(json.RawMessage(`{"features":{"terminalRestoreModes":true}}`)) {
+		t.Fatal("restore-capable host rejected")
+	}
+	if terminalRestoreAvailable(json.RawMessage(`{"features":{"terminalRestoreModes":false}}`)) {
+		t.Fatal("older host accepted terminal restore")
+	}
+}
+
 func TestDirectoryLoadsAllPages(t *testing.T) {
 	call := directoryCaller(func(_ context.Context, typ string, p json.RawMessage) (json.RawMessage, error) {
 		var req struct {
