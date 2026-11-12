@@ -43,6 +43,7 @@ type pendingCall struct {
 	sub      *Subscription
 	started  bool
 	terminal *TerminalStream
+	usage    *usageStream
 }
 type Client struct {
 	mu               sync.Mutex
@@ -298,6 +299,10 @@ func (c *Client) call(ctx context.Context, requestType string, payload json.RawM
 	return c.callTerminal(ctx, requestType, payload, sub, expected, nil)
 }
 func (c *Client) callTerminal(ctx context.Context, requestType string, payload json.RawMessage, sub *Subscription, expected *websocket.Conn, terminal *TerminalStream) (json.RawMessage, error) {
+	return c.callWithUsage(ctx, requestType, payload, sub, expected, terminal, nil)
+}
+
+func (c *Client) callWithUsage(ctx context.Context, requestType string, payload json.RawMessage, sub *Subscription, expected *websocket.Conn, terminal *TerminalStream, usage *usageStream) (json.RawMessage, error) {
 	if requestType == "" {
 		return nil, errors.New("empty request type")
 	}
@@ -348,7 +353,7 @@ func (c *Client) callTerminal(ctx context.Context, requestType string, payload j
 		c.mu.Unlock()
 		return nil, errors.New("request already in flight")
 	}
-	pending := &pendingCall{ch: ch, sub: sub, terminal: terminal}
+	pending := &pendingCall{ch: ch, sub: sub, terminal: terminal, usage: usage}
 	c.pending[id] = pending
 	c.mu.Unlock()
 	defer func() {
@@ -370,11 +375,24 @@ func (c *Client) callTerminal(ctx context.Context, requestType string, payload j
 		c.disconnect(conn, err)
 		return nil, fmt.Errorf("%w: %v", ErrOutcomeUnknown, err)
 	}
-	select {
-	case r := <-ch:
-		return r.payload, r.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("%w: %v", ErrOutcomeUnknown, ctx.Err())
+	var updates <-chan struct{}
+	if usage != nil {
+		updates = usage.notify
+	}
+	for {
+		select {
+		case r := <-ch:
+			if usage != nil && ctx.Err() == nil {
+				c.deliverUsage(usage)
+			}
+			return r.payload, r.err
+		case <-updates:
+			if ctx.Err() == nil {
+				c.deliverUsage(usage)
+			}
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w: %v", ErrOutcomeUnknown, ctx.Err())
+		}
 	}
 }
 func (c *Client) readLoop(conn *websocket.Conn) {
@@ -421,8 +439,31 @@ func (c *Client) dispatch(conn *websocket.Conn, data []byte) {
 		c.mu.Unlock()
 		return
 	}
+	if m.Type == "usage.list_reports.update" {
+		if pending := c.pending[p.RequestID]; pending != nil && pending.usage != nil && !pending.usage.closed {
+			var update struct {
+				Report json.RawMessage `json:"report"`
+			}
+			if json.Unmarshal(m.Payload, &update) == nil && len(update.Report) > 0 && string(update.Report) != "null" {
+				pending.usage.reports = append(pending.usage.reports, update.Report)
+				select {
+				case pending.usage.notify <- struct{}{}:
+				default:
+				}
+			}
+		}
+		c.mu.Unlock()
+		return
+	}
 	if p.RequestID != "" && (m.Type == "rpc_error" || m.Type == "status" || m.Type == "pong" || m.Type == "agent_permission_resolved" || m.Type == "agent_archived" || m.Type == "agent_deleted" || strings.HasSuffix(m.Type, "_response") || strings.HasSuffix(m.Type, ".response") || strings.HasSuffix(m.Type, "/response")) {
 		if pending, ok := c.pending[p.RequestID]; ok {
+			if pending.usage != nil {
+				if m.Type != "usage.list_reports.response" && m.Type != "rpc_error" {
+					c.mu.Unlock()
+					return
+				}
+				pending.usage.closed = true
+			}
 			var e error
 			if m.Type == "rpc_error" {
 				e = &RPCError{p.RequestID, p.RequestType, p.Code, p.Error}

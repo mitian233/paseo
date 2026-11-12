@@ -7,12 +7,6 @@ import (
 
 func (a *App) homeView(c *ui.Context) {
 	width, _ := c.Size()
-	shell := a.desk.shell
-	shell.ExplorerOpen = false
-	layout := shell.Layout(width)
-	if layout.NavVisible {
-		width -= layout.NavWidth
-	}
 	props := desktopui.ShellProps{Theme: a.desk.prefs.Theme, SystemDark: c.Theme().Dark, Width: width}
 	if !a.connected {
 		props.Status = a.status
@@ -21,7 +15,7 @@ func (a *App) homeView(c *ui.Context) {
 		props.Status = a.desk.notice
 	}
 	actions := desktopui.HomeActions{
-		Menu:           func() { a.desk.shell.NavHidden = !a.desk.shell.NavHidden },
+		Menu:           a.toggleNavigation,
 		AddProject:     func() { a.requestHomeAction("project") },
 		ImportSession:  func() { a.requestHomeAction("import") },
 		SetupProviders: func() { a.requestHomeAction("providers") },
@@ -45,6 +39,24 @@ func (a *App) requestHomeAction(action string) {
 	} else if !a.connecting {
 		a.forceSelectHost(a.desk.prefs.ActiveHost)
 	}
+}
+
+func (a *App) requestHostHomeAction(hostID, action string) {
+	if hostID == "" || hostID == a.desk.prefs.ActiveHost {
+		a.requestHomeAction(action)
+		return
+	}
+	start := func() {
+		a.forceSelectHost(hostID)
+		a.requestHomeAction(action)
+	}
+	for _, panel := range a.desk.supporting {
+		if panel.HasUnsavedWork() {
+			a.confirm("Switch host and discard unsaved file changes?", start)
+			return
+		}
+	}
+	start()
 }
 
 func (a *App) resumeHomeAction() {

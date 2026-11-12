@@ -57,6 +57,12 @@ func Shell(c *ui.Context, state *ShellState, props ShellProps, actions ShellActi
 			})
 		}
 	})
+	if state.NavOverlay && !layout.NavVisible {
+		_, height := c.Size()
+		ui.Modal(c.Key("navigation-overlay"), &state.NavOverlay, func() {
+			ui.Column(c).Width(min(320, props.Width-48)).Height(height).Background(colors.Sidebar).Children(func() { sidebar(c, state, props, actions, colors) })
+		}).Absolute().Left(0).Top(0).Padding(0).Radius(0).MaxWidth(props.Width).MaxHeight(height)
+	}
 	if !props.Home && state.ExplorerOpen && props.Width < 600 && explorer != nil {
 		open := true
 		ui.Modal(c, &open, func() { ui.Column(c).Width(max(240, props.Width-48)).Height(500).Children(func() { explorer(c) }) })
@@ -76,10 +82,13 @@ func resizeHandle(c *ui.Context, colors Tokens, resize func(float32)) ui.Element
 }
 
 func sidebar(c *ui.Context, state *ShellState, p ShellProps, a ShellActions, colors Tokens) {
-	// 36px chrome row — matches TitlebarDragRegion height in the RN desktop sidebar.
-	// On Linux/Windows this is a transparent drag affordance; macOS gets traffic lights.
-	// It intentionally contains no interactive widgets so the area can be dragged.
-	ui.Row(c).Height(36).Shrink(0)
+	if !p.PreserveWorkspaceOrder {
+		p.Workspaces = sidebarWorkspaces(p.Workspaces)
+	}
+
+	if p.ChromeHeight > 0 {
+		ui.Row(c).Height(p.ChromeHeight).Shrink(0)
+	}
 
 	// Nav rows section — mirrors SidebarNavRows in the RN app:
 	// paddingTop 8, gap 2, paddingBottom 6, horizontal 8, then a bottom border.
@@ -103,18 +112,36 @@ func sidebar(c *ui.Context, state *ShellState, p ShellProps, a ShellActions, col
 	}
 	if hasNavRows {
 		ui.Column(c).Shrink(0).Padding(8, 8, 6, 8).Gap(2).BorderWidth(0, 0, 1, 0).BorderColor(colors.Border).Children(func() {
-			for _, it := range navItems {
-				if it.action == nil {
+			for _, pref := range OrderedNavigation(p.NavItems) {
+				if pref.Hidden {
 					continue
 				}
-				action := it.action
-				navRow(c.Key(it.key), it.label, it.icon, action, colors)
+				for _, it := range navItems {
+					if it.key != "nav:"+pref.ID {
+						continue
+					}
+					navRow(c.Key(it.key), it.label, it.icon, it.action, p.ActiveDestination == pref.ID, colors)
+				}
 			}
 		})
 	}
 
 	// Projects scroll — existing list logic unchanged.
 	ui.Scroll(c).Grow(1).Children(func() {
+		if p.SidebarHeader != nil {
+			p.SidebarHeader(c)
+		} else {
+			ui.Text(c, "Workspaces").Padding(4, 8).FontSize(12).TextColor(colors.Muted)
+		}
+		if p.SidebarStatus != nil {
+			p.SidebarStatus(c)
+		}
+		if p.SidebarLoading {
+			ui.Text(c, "Loading workspaces…").Padding(12, 16).TextColor(colors.Muted)
+		}
+		if p.SidebarEmpty == "no-hosts" {
+			ui.Text(c, "Add a host to see its projects.").Padding(12, 16).TextColor(colors.Muted)
+		}
 		projects := p.Projects
 		if len(projects) == 0 {
 			for _, w := range p.Workspaces {
@@ -148,7 +175,13 @@ func sidebar(c *ui.Context, state *ShellState, p ShellProps, a ShellActions, col
 				arrow = "▸"
 			}
 			projectRow := row(c.Key("project:"+project), item.Name, arrow, 12, false, colors)
-			if a.ProjectSettings != nil || a.OpenProjectFolder != nil || a.OpenProjectInNewWindow != nil || a.RemoveProject != nil || a.RenameProject != nil || a.CreateWorkspace != nil {
+			if a.ReorderSidebarProject != nil && !item.Group {
+				projectRow = projectRow.Drag(project)
+				if moved, ok := ui.Drop[string](projectRow); ok {
+					a.ReorderSidebarProject(moved, project)
+				}
+			}
+			if !item.Group && (a.ProjectSettings != nil || a.OpenProjectFolder != nil || a.OpenProjectInNewWindow != nil || a.RemoveProject != nil || a.RenameProject != nil || a.CreateWorkspace != nil) {
 				projectRow.ContextMenu(func(m *ui.Menu) {
 					if a.CreateWorkspace != nil && m.Item("New workspace").Chosen() {
 						a.CreateWorkspace(project)
@@ -185,7 +218,23 @@ func sidebar(c *ui.Context, state *ShellState, p ShellProps, a ShellActions, col
 					continue
 				}
 				w := workspace
-				workspaceRow := row(c.Key("workspace:"+w.ID), w.Name, "", 32, w.ID == p.ActiveWorkspace, colors)
+				label := w.Name
+				if w.Pinned {
+					label = "⌖ " + label
+				}
+				if w.Unread {
+					label += " •"
+				}
+				if w.Status != "" {
+					label += " · " + w.Status
+				}
+				workspaceRow := row(c.Key("workspace:"+w.ID), label, "", 32, w.ID == p.ActiveWorkspace, colors)
+				if a.ReorderSidebarWorkspace != nil {
+					workspaceRow = workspaceRow.Drag(w.ID)
+					if moved, ok := ui.Drop[string](workspaceRow); ok {
+						a.ReorderSidebarWorkspace(moved, w.ID)
+					}
+				}
 				if a.CopyWorkspacePath != nil || a.CopyWorkspaceBranch != nil || a.RenameWorkspace != nil || a.MarkWorkspaceRead != nil || a.MarkWorkspaceUnread != nil || a.ToggleWorkspacePin != nil || a.OpenWorkspaceFolder != nil || a.ArchiveWorkspace != nil {
 					workspaceRow.ContextMenu(func(m *ui.Menu) {
 						if a.CopyWorkspacePath != nil && m.Item("Copy path").Chosen() {
@@ -217,30 +266,26 @@ func sidebar(c *ui.Context, state *ShellState, p ShellProps, a ShellActions, col
 				if workspaceRow.Clicked() && a.SelectWorkspace != nil {
 					a.SelectWorkspace(w.ID)
 				}
-				if w.ID == p.ActiveWorkspace {
-					for _, agent := range p.Agents {
-						if agent.WorkspaceID != w.ID {
-							continue
-						}
-						ag := agent
-						label := ag.Title
-						if ag.Status != "" {
-							label += " · " + ag.Status
-						}
-						if row(c.Key("agent:"+ag.ID), label, "", 48, false, colors).Clicked() && a.OpenAgent != nil {
-							a.OpenAgent(ag.ID)
-						}
-					}
-				}
 			}
 		}
-		if len(projects) == 0 {
-			ui.Column(c).Padding(12, 16).Gap(4).Children(func() {
-				ui.Text(c, "No projects yet").FontSize(14).TextColor(colors.Muted)
-				ui.Text(c, "Add a project to get started").FontSize(13).TextColor(colors.Muted)
+		if len(projects) == 0 && p.SidebarEmpty == "no-projects" {
+			ui.Column(c).Margin(12, 8, 0, 8).Padding(16).Gap(4).Border(1, colors.Border).Radius(8).Children(func() {
+				ui.Text(c, "No projects yet").FontSize(12).TextColor(colors.Foreground)
+				ui.Text(c, "Add a project to get started").FontSize(12).TextColor(colors.Muted)
+				ui.Row(c).Margin(16, 0, 0, 0).Gap(8).Wrap().Children(func() {
+					if ui.Button(c, "Add project").Disabled(a.AddProject == nil).Clicked() {
+						a.AddProject()
+					}
+					if ui.Button(c, "Import session").Disabled(a.ImportSession == nil).Clicked() {
+						a.ImportSession()
+					}
+				})
 			})
 		}
 	})
+	if p.UsageSummary != "" {
+		ui.Text(c, p.UsageSummary).Padding(6, 8).FontSize(12).TextColor(colors.Muted)
+	}
 
 	// Footer icon row — mirrors SidebarFooter's bottom icon line.
 	// FolderPlus (add project) on the left, host picker + help + settings on the right.
@@ -248,19 +293,32 @@ func sidebar(c *ui.Context, state *ShellState, p ShellProps, a ShellActions, col
 		if a.AddProject != nil && iconButton(c.Key("sidebar-add-project"), "Add project", folderPlusIcon, colors).Clicked() {
 			a.AddProject()
 		}
-		ui.Spacer(c)
+		if a.OpenUsage != nil && iconButton(c.Key("sidebar-usage"), "Usage", usageIcon, colors).Clicked() {
+			a.OpenUsage()
+		}
 		iconButton(c.Key("sidebar-hosts"), "Hosts", serverIcon, colors).PopoverMenuButton(func(m *ui.Menu) {
 			for _, host := range p.Hosts {
 				h := host
-				if m.Item(h.Name).Chosen() && a.SelectHost != nil {
-					a.SelectHost(h.ID)
+				label := h.Name
+				if h.Status != "" {
+					label += " · " + h.Status
+				}
+				if m.Item(label).Chosen() && a.OpenHostSettings != nil {
+					a.OpenHostSettings(h.ID)
 				}
 			}
 			if a.AddHost != nil && m.Item("Add host").Chosen() {
 				a.AddHost()
 			}
 		})
-		iconButton(c.Key("sidebar-help"), "Help", helpIcon, colors)
+		ui.Spacer(c)
+		iconButton(c.Key("sidebar-help"), "Help", helpIcon, colors).PopoverMenuButton(func(m *ui.Menu) {
+			for _, item := range p.HelpItems {
+				if m.Item(item.Label).Chosen() && item.Run != nil {
+					item.Run()
+				}
+			}
+		})
 		if a.OpenSettings != nil && iconButton(c.Key("sidebar-settings"), "Settings", settingsIcon, colors).Clicked() {
 			a.OpenSettings()
 		}
@@ -283,9 +341,10 @@ func row(c *ui.Context, text, icon string, indent float32, selected bool, colors
 
 // navRow renders a compact nav row matching SidebarHeaderRow variant="compact" in the RN app:
 // 28px min-height, 16px horizontal padding, 8px gap, muted foreground defaulting to full on hover.
-func navRow(c *ui.Context, label string, icon *ui.SVG, action func(), colors Tokens) {
+func navRow(c *ui.Context, label string, icon *ui.SVG, action func(), selected bool, colors Tokens) {
 	b := ui.ButtonBase(c).MinHeight(28).Padding(4, 8).Gap(8).Radius(6).Justify(ui.Start).TextColor(colors.Muted)
-	if b.Hovered() {
+	b.Disabled(action == nil).Label(label)
+	if selected || b.Hovered() {
 		b = b.Background(colors.Selected).TextColor(colors.Foreground)
 	}
 	b.Children(func() {
@@ -299,6 +358,9 @@ func navRow(c *ui.Context, label string, icon *ui.SVG, action func(), colors Tok
 
 func workspaceHeader(c *ui.Context, p ShellProps, a ShellActions, colors Tokens) {
 	ui.Row(c).Height(52).Padding(0, 16).Gap(10).Children(func() {
+		if a.ToggleNavigation != nil && iconButton(c.Key("workspace-menu"), "Menu", explorerIcon, colors).Clicked() {
+			a.ToggleNavigation()
+		}
 		title := p.WorkspaceTitle
 		if title == "" {
 			title = "Workspace"

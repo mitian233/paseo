@@ -42,3 +42,18 @@ func TestHiddenNavigationPreservesPreferredWidth(t *testing.T) {
 		t.Fatalf("reopened menu = %+v", got)
 	}
 }
+
+func TestNarrowWidthHidesNavigationAndKeepsOverlayAvailable(t *testing.T) {
+	state := ShellState{NavWidth: 320}
+	layout := state.Layout(480)
+	if layout.NavVisible {
+		t.Fatalf("narrow layout keeps navigation visible: %+v", layout)
+	}
+	if layout.ExplorerVisible {
+		t.Fatalf("narrow layout keeps explorer docked: %+v", layout)
+	}
+	wide := state.Layout(1100)
+	if !wide.NavVisible || wide.NavWidth != 320 {
+		t.Fatalf("preferred navigation width changed: %+v", wide)
+	}
+}

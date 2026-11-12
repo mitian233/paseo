@@ -10,7 +10,7 @@ func Theme(mode string, systemDark bool) (*ui.Theme, Tokens) {
 	var colors Tokens
 	if dark {
 		t = ui.DarkTheme()
-		colors = Tokens{ui.Hex("#1E2120"), ui.Hex("#141716"), ui.Hex("#181B1A"), ui.Hex("#272A29"), ui.Hex("#f4f4f5"), ui.Hex("#A1A5A4"), ui.Hex("#252B2A")}
+		colors = Tokens{ui.Hex("#181B1A"), ui.Hex("#141716"), ui.Hex("#1E2120"), ui.Hex("#272A29"), ui.Hex("#f4f4f5"), ui.Hex("#A1A5A4"), ui.Hex("#252B2A")}
 	} else {
 		t = ui.LightTheme()
 		colors = Tokens{ui.Hex("#ffffff"), ui.Hex("#f4f4f5"), ui.Hex("#fafafa"), ui.Hex("#d4d4d8"), ui.Hex("#1a1a1e"), ui.Hex("#71717a"), ui.Hex("#e4e4e7")}

@@ -50,6 +50,7 @@ type desktopState struct {
 	confirmationOpen                               bool
 	confirmationText                               string
 	confirmed                                      func()
+	confirmationCancel                             func()
 	newAgentOpen, newAgentBusy                     bool
 	newAgentProvider, newAgentTitle, newAgentError string
 	forkAttachment                                 json.RawMessage
@@ -65,6 +66,17 @@ type desktopState struct {
 	conversations                                  map[string]*conversationOwner
 	frame                                          uint64
 	loadFailed                                     bool
+	destination                                    string
+	pendingOpen                                    pendingNavigation
+	history                                        historyState
+	schedules                                      schedulesState
+	newWorkspace                                   newWorkspaceState
+	usage                                          usageState
+	hostSettings                                   hostSettingsState
+	footerHelp                                     footerHelpState
+	commandCenter                                  commandCenterState
+	windowWidth                                    float32
+	sidebarDirectory                               sidebarDirectoryState
 }
 
 func (a *App) initializeDesktop(rawURL string) {
@@ -94,6 +106,8 @@ func (a *App) initializeDesktop(rawURL string) {
 		a.desk.prefs.ActiveWorkspace = make(map[string]string)
 	}
 	a.desk.shell = desktopui.ShellState{NavWidth: a.desk.prefs.NavWidth, ExplorerWidth: a.desk.prefs.ExplorerWidth, ExplorerOpen: a.desk.prefs.ExplorerOpen, ExpandedProjects: a.desk.prefs.ExpandedProjects}
+	a.desk.shell.NavHidden = a.desk.prefs.NavHidden
+	a.desk.shell.ProjectFilter = a.desk.prefs.SidebarProjectFilter
 	if rawURL != "" {
 		found := false
 		for _, h := range a.desk.prefs.Hosts {
@@ -153,6 +167,8 @@ func (a *App) persistDesktop() {
 	a.desk.prefs.NavWidth = a.desk.shell.NavWidth
 	a.desk.prefs.ExplorerWidth = a.desk.shell.ExplorerWidth
 	a.desk.prefs.ExplorerOpen = a.desk.shell.ExplorerOpen
+	a.desk.prefs.SidebarProjectFilter = a.desk.shell.ProjectFilter
+	a.desk.prefs.NavHidden = a.desk.shell.NavHidden
 	a.desk.prefs.ExpandedProjects = a.desk.shell.ExpandedProjects
 	if err := a.desk.prefs.Save(a.desk.path); err != nil {
 		a.desk.notice = "Settings could not be saved: " + err.Error()
@@ -258,6 +274,7 @@ func (a *App) releaseSelection() {
 	a.agentRunning = false
 }
 func (a *App) selectWorkspace(id string) {
+	a.desk.destination = "workspace"
 	a.desk.shell.NavHidden = false
 	if id == a.desk.workspace {
 		return
@@ -272,6 +289,7 @@ func (a *App) selectWorkspace(id string) {
 	a.persistSoon()
 }
 func (a *App) openAgent(id string) {
+	a.desk.destination = "workspace"
 	for _, ag := range a.agents {
 		if ag.ID == id {
 			if ag.WorkspaceID != "" && ag.WorkspaceID != a.desk.workspace {
@@ -417,13 +435,23 @@ func (a *App) selectHost(id string) {
 	}
 	for _, p := range a.desk.supporting {
 		if p.HasUnsavedWork() {
-			a.confirm("Switch host and discard unsaved file changes?", func() { a.forceSelectHost(id) })
+			pending := a.desk.pendingOpen
+			a.confirmWithCancel("Switch host and discard unsaved file changes?", func() { a.forceSelectHost(id) }, func() {
+				if a.desk.pendingOpen == pending {
+					a.desk.pendingOpen = pendingNavigation{}
+				}
+			})
 			return
 		}
 	}
 	a.forceSelectHost(id)
 }
 func (a *App) forceSelectHost(id string) {
+	// A pending jump belongs to the host it targets. Switching to any other
+	// host by hand abandons it instead of opening it later.
+	if a.desk.pendingOpen.host != "" && a.desk.pendingOpen.host != id {
+		a.desk.pendingOpen = pendingNavigation{}
+	}
 	a.captureConversation()
 	a.stop()
 	if id != a.desk.prefs.ActiveHost {
@@ -502,16 +530,35 @@ func (a *App) saveHost(name, address, password, local string) {
 	a.desk.shell.HostEditor = desktopui.HostEditorState{}
 	a.desk.editingHost = ""
 	a.forceSelectHost(id)
+	a.resumeNewWorkspacePicker()
 }
 func (a *App) confirm(text string, fn func()) {
 	a.desk.confirmationText = text
 	a.desk.confirmed = fn
+	a.desk.confirmationCancel = nil
 	a.desk.confirmationOpen = true
 }
+func (a *App) confirmWithCancel(text string, fn func(), cancel func()) {
+	a.confirm(text, fn)
+	a.desk.confirmationCancel = cancel
+}
 func (a *App) shellView(c *ui.Context) {
+	a.ensureSidebarDirectory()
+	a.ensureUsageSummary()
 	width, _ := c.Size()
+	a.desk.windowWidth = width
 	props := desktopui.ShellProps{Theme: a.desk.prefs.Theme, SystemDark: c.Theme().Dark, Width: width, ActiveHost: a.desk.prefs.ActiveHost, ActiveWorkspace: a.desk.workspace, Status: a.status}
-	props.Home = !a.connected || a.desk.workspace == ""
+	props.Home = a.desk.destination != "workspace" || !a.connected || a.desk.workspace == ""
+	props.ActiveDestination = a.desk.destination
+	if a.desk.prefs.UsageInSidebar {
+		props.UsageSummary = usageSummary(a.desk.usage.reports, a.desk.prefs.UsagePins, a.desk.prefs.UsageRemaining)
+	}
+	for _, item := range a.footerHelpItems() {
+		props.HelpItems = append(props.HelpItems, desktopui.MenuAction{Label: item.Label, Run: item.Action})
+	}
+	for _, pref := range a.desk.prefs.SidebarNav {
+		props.NavItems = append(props.NavItems, desktopui.NavPreference{ID: pref.ID, Hidden: pref.Hidden})
+	}
 	if a.desk.notice != "" {
 		props.Status = a.desk.notice
 	}
@@ -528,14 +575,11 @@ func (a *App) shellView(c *ui.Context) {
 		}
 		props.Hosts = append(props.Hosts, desktopui.Host{ID: h.ID, Name: h.Name, Status: status})
 	}
-	for _, project := range a.projects {
-		props.Projects = append(props.Projects, desktopui.Project{ID: project.ID, Name: project.Name})
-	}
 	for _, w := range a.workspaces {
-		props.Workspaces = append(props.Workspaces, desktopui.Workspace{ID: w.ID, ProjectID: w.ProjectID, Project: w.Project, Name: w.Name})
 		if w.ID == a.desk.workspace {
 			props.WorkspaceTitle = w.Name
 			props.Branch = w.Git.CurrentBranch
+			break
 		}
 	}
 	for _, ag := range a.agents {
@@ -559,6 +603,7 @@ func (a *App) shellView(c *ui.Context) {
 	}
 	props.HideTabStrip = true
 	a.installNavigationActions(&actions)
+	a.applySidebarDirectory(&props, &actions)
 	actions.ToggleExplorer = func() {
 		a.desk.shell.ExplorerOpen = !a.desk.shell.ExplorerOpen
 		if a.desk.shell.ExplorerOpen {
@@ -597,12 +642,32 @@ func (a *App) shellView(c *ui.Context) {
 	a.homeImportDialog(c)
 	a.homeProvidersDialog(c)
 	a.homePairingDialog(c)
+	a.commandCenterDialog(c)
+	a.usageDialog(c)
+	a.footerHelpDialog(c)
 	if a.selected != "" && a.desk.prefs.Draft(a.desk.prefs.ActiveHost, a.selected) != a.draft {
 		a.desk.prefs.SetDraft(a.desk.prefs.ActiveHost, a.selected, a.draft)
 		a.persistSoon()
 	}
 }
 func (a *App) activeContent(c *ui.Context) {
+	switch a.desk.destination {
+	case "home":
+		a.homeView(c)
+		return
+	case "history":
+		a.historyView(c)
+		return
+	case "schedules":
+		a.schedulesView(c)
+		return
+	case "new-workspace":
+		a.newWorkspaceView(c)
+		return
+	case "host-settings":
+		a.hostSettingsView(c)
+		return
+	}
 	if a.desk.settingsOpen {
 		a.settingsView(c)
 		return
@@ -690,6 +755,29 @@ func (a *App) settingsView(c *ui.Context) {
 				}
 			}
 		})
+		ui.Text(c, "Sidebar navigation")
+		prefs := make([]desktopui.NavPreference, 0, len(a.desk.prefs.SidebarNav))
+		for _, pref := range a.desk.prefs.SidebarNav {
+			prefs = append(prefs, desktopui.NavPreference{ID: pref.ID, Hidden: pref.Hidden})
+		}
+		ordered := desktopui.OrderedNavigation(prefs)
+		for i, pref := range ordered {
+			ui.Row(c.Key(pref.ID)).Gap(8).Children(func() {
+				visible := !pref.Hidden
+				if ui.Checkbox(c, &visible, pref.ID).Changed() {
+					ordered[i].Hidden = !visible
+					a.saveSidebarNavigation(ordered)
+				}
+				if ui.Button(c, "Move up").Disabled(i == 0).Clicked() {
+					ordered[i-1], ordered[i] = ordered[i], ordered[i-1]
+					a.saveSidebarNavigation(ordered)
+				}
+				if ui.Button(c, "Move down").Disabled(i == len(ordered)-1).Clicked() {
+					ordered[i+1], ordered[i] = ordered[i], ordered[i+1]
+					a.saveSidebarNavigation(ordered)
+				}
+			})
+		}
 		ui.Text(c, "Hosts")
 		for _, h := range a.desk.prefs.Hosts {
 			h := h
@@ -779,9 +867,17 @@ func (a *App) newAgent() {
 func (a *App) dialogs(c *ui.Context) {
 	if a.desk.confirmationOpen {
 		choice := ui.AlertDialog(c, &a.desk.confirmationOpen, "Unsaved changes", a.desk.confirmationText, "Cancel", "Discard changes")
+		if choice == 0 {
+			if cancel := a.desk.confirmationCancel; cancel != nil {
+				a.desk.confirmationCancel = nil
+				a.desk.confirmed = nil
+				cancel()
+			}
+		}
 		if choice == 1 && a.desk.confirmed != nil {
 			fn := a.desk.confirmed
 			a.desk.confirmed = nil
+			a.desk.confirmationCancel = nil
 			fn()
 		}
 	}

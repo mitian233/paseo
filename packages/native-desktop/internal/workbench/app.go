@@ -58,7 +58,13 @@ func New(url string) *App { a := &App{URL: url}; a.initializeDesktop(url); retur
 func (a *App) Open() {
 	a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Paseo", Width: 1100, Height: 760, MinWidth: 700, MinHeight: 480, Content: ui.View(a.view)})
 	a.diagrams = NewDiagrams(a.win.Update)
-	a.win.OnClosed(func() { a.captureConversation(); a.persistDesktop(); a.stop(); a.diagrams.Close() })
+	a.win.OnClosed(func() {
+		a.captureConversation()
+		a.closeSidebarDirectory()
+		a.persistDesktop()
+		a.stop()
+		a.diagrams.Close()
+	})
 	if a.URL != "" {
 		a.connect()
 	}
@@ -69,6 +75,12 @@ func (a *App) stop() {
 	a.closeHomeImport()
 	a.closeHomeProviders()
 	a.closeHomePairing()
+	a.closeHistory()
+	a.closeSchedules()
+	a.closeNewWorkspace()
+	a.closeUsage()
+	a.desk.commandCenter.open = false
+	a.desk.commandCenter.revision++
 	a.workspaces = nil
 	a.agents = nil
 	a.projects = nil
@@ -196,6 +208,9 @@ func (a *App) connect() {
 		a.update(gen, func() {
 			if err != nil {
 				a.status = "Directory error: " + err.Error()
+				// The transport is up but the directory is not. The pending
+				// navigation stays pending until a refresh succeeds.
+				a.completePendingNavigation()
 				return
 			}
 			a.workspaces = ws
@@ -203,6 +218,7 @@ func (a *App) connect() {
 			a.restoreWorkspace()
 			a.status = fmt.Sprintf("%d workspaces · %d agents", len(ws), len(agents))
 			a.resumeHomeAction()
+			a.completePendingNavigation()
 		})
 	}()
 }

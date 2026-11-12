@@ -194,7 +194,6 @@ func (a *App) refreshDirectory() {
 		return
 	}
 	c, gen := a.client, a.generation
-	a.refreshProjects()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -206,7 +205,8 @@ func (a *App) refreshDirectory() {
 			}
 			a.workspaces = ws
 			a.agents = agents
-			a.restoreWorkspace()
+			a.refreshSidebarDirectory()
+			a.completePendingNavigation()
 		})
 	}()
 }

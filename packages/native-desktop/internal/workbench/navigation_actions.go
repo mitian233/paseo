@@ -207,7 +207,10 @@ func (a *App) navigationExecute(key, kind string, payload map[string]any, closeD
 				n.open = false
 			}
 			a.status = "Done"
-			a.refreshDirectory()
+			a.refreshSidebarDirectory()
+			if kind == "project.add.request" {
+				a.resumeNewWorkspacePicker()
+			}
 		})
 	}()
 }
@@ -223,7 +226,14 @@ func (a *App) installNavigationActions(actions *desktopui.ShellActions) {
 		}
 	}
 	actions.AddProject = func() { a.requestHomeAction("project") }
-	actions.NewWorkspace = func() { a.requestHomeAction("project") }
+	actions.NewWorkspace = a.openNewWorkspace
+	actions.OpenHistory = a.openHistory
+	actions.OpenSchedules = a.openSchedules
+	actions.OpenSearch = a.openCommandCenter
+	actions.ImportSession = func() { a.requestHomeAction("import") }
+	actions.OpenUsage = a.openUsage
+	actions.OpenHostSettings = a.openHostSettings
+	actions.ToggleNavigation = a.toggleNavigation
 	actions.CreateWorkspace = func(id string) {
 		if p, ok := a.navigationProject(id); ok {
 			a.navigationOpen("create workspace", id, p.Root, p.Root)

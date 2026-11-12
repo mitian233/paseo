@@ -29,19 +29,35 @@ type WorkspaceLayout struct {
 	ExplorerKind string     `json:"explorerKind,omitempty"`
 }
 type State struct {
-	Hosts            []Host                      `json:"hosts"`
-	ActiveHost       string                      `json:"activeHost,omitempty"`
-	ActiveWorkspace  map[string]string           `json:"activeWorkspace,omitempty"`
-	Workspaces       map[string]*WorkspaceLayout `json:"workspaces,omitempty"`
-	Drafts           map[string]string           `json:"drafts,omitempty"`
-	Theme            string                      `json:"theme,omitempty"`
-	NavWidth         float32                     `json:"navWidth,omitempty"`
-	ExplorerWidth    float32                     `json:"explorerWidth,omitempty"`
-	ExplorerOpen     bool                        `json:"explorerOpen,omitempty"`
-	ExpandedProjects map[string]bool             `json:"expandedProjects,omitempty"`
+	Hosts                   []Host                      `json:"hosts"`
+	ActiveHost              string                      `json:"activeHost,omitempty"`
+	ActiveWorkspace         map[string]string           `json:"activeWorkspace,omitempty"`
+	Workspaces              map[string]*WorkspaceLayout `json:"workspaces,omitempty"`
+	Drafts                  map[string]string           `json:"drafts,omitempty"`
+	Theme                   string                      `json:"theme,omitempty"`
+	NavWidth                float32                     `json:"navWidth,omitempty"`
+	ExplorerWidth           float32                     `json:"explorerWidth,omitempty"`
+	ExplorerOpen            bool                        `json:"explorerOpen,omitempty"`
+	ExpandedProjects        map[string]bool             `json:"expandedProjects,omitempty"`
+	UsageRemaining          bool                        `json:"usageRemaining,omitempty"`
+	UsageInSidebar          bool                        `json:"usageInSidebar,omitempty"`
+	UsagePins               map[string]bool             `json:"usagePins,omitempty"`
+	UsageHost               string                      `json:"usageHost,omitempty"`
+	NavHidden               bool                        `json:"navHidden,omitempty"`
+	SidebarNav              []SidebarNavPreference      `json:"sidebarNav,omitempty"`
+	SidebarGroup            string                      `json:"sidebarGroup,omitempty"`
+	SidebarProjectFilter    string                      `json:"sidebarProjectFilter,omitempty"`
+	NewWorkspacePreferences map[string]string           `json:"newWorkspacePreferences,omitempty"`
+	SidebarDirectory        json.RawMessage             `json:"sidebarDirectory,omitempty"`
 }
 
 func Scope(host, target string) string { return host + "\x00" + target }
+
+type SidebarNavPreference struct {
+	ID     string `json:"id"`
+	Hidden bool   `json:"hidden,omitempty"`
+}
+
 func (s *State) Layout(host, workspace string) *WorkspaceLayout {
 	if s.Workspaces == nil {
 		s.Workspaces = make(map[string]*WorkspaceLayout)

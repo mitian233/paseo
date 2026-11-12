@@ -34,12 +34,15 @@ type Workspace struct {
 	PinnedAt *string `json:"pinnedAt"`
 }
 type Agent struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	WorkspaceID string `json:"workspaceId"`
-	CWD         string `json:"cwd"`
-	Provider    string `json:"provider"`
-	Status      string `json:"status"`
+	ID                     string `json:"id"`
+	Title                  string `json:"title"`
+	WorkspaceID            string `json:"workspaceId"`
+	CWD                    string `json:"cwd"`
+	Provider               string `json:"provider"`
+	Status                 string `json:"status"`
+	RequiresAttention      bool   `json:"requiresAttention"`
+	AttentionReason        string `json:"attentionReason"`
+	PendingPermissionCount int    `json:"pendingPermissionCount"`
 }
 type directoryPage struct {
 	Entries  []json.RawMessage `json:"entries"`
